@@ -1,0 +1,389 @@
+#!/usr/bin/python -u
+
+
+from __future__ import print_function
+import datetime
+import subprocess
+import string
+import random
+import sys
+import os
+import os.path
+import libvirt
+import uuid
+from xml.dom import minidom
+
+
+__author__ = "Gena Makhomed"
+__contact__ = "https://github.com/makhomed/vm"
+__license__ = "GPLv3"
+__version__ = "1.0.0"
+__date__ = "2018-07-08"
+
+
+def fatal(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+class Process(object):
+    def __init__(self, *args):
+        self.args = args
+        process = subprocess.Popen(args, stdin=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True, cwd='/')
+        self.stdout, self.stderr = process.communicate()
+        self.returncode = process.returncode
+
+    def failed(self):
+        return self.returncode != 0
+
+    def print_info(self, message):
+        print(message + ": Process(", self.args, ") failed")
+        print("returncode:", self.returncode)
+        print("stdout:", self.stdout)
+        print("stderr:", self.stderr)
+
+    @staticmethod
+    def execute(*args):
+        process = Process(*args)
+        if process.returncode != 0 or process.stdout != '' or process.stderr != '':
+            process.print_info("fatal error")
+            sys.exit(1)
+
+
+class Domain(object):
+    def __init__(self, domain):
+        self.domain = domain
+        self.xml = self.domain.XMLDesc(0)
+        self.dom = minidom.parseString(self.xml)
+        emulator = self.dom.getElementsByTagName('emulator')[0].firstChild.data
+        if not ('qemu' in emulator and 'kvm' in emulator):
+            fatal("Unsupported emulator '%s' for domain '%s'" % (emulator, self.name()))
+        self._parse_interfaces()
+        self._parse_disks()
+
+    def _parse_interfaces(self):
+        self.bridges = set()
+        self.mac_addresses = set()
+        interfaces = self.dom.getElementsByTagName('interface')
+        for interface in interfaces:
+            interface_type = interface.getAttribute('type')
+            if interface_type != 'bridge':
+                fatal("Unsupported interface type '%s' in domain '%s'" % (interface_type, self.name()))
+            mac = interface.getElementsByTagName('mac')[0]
+            mac_address = mac.getAttribute('address')
+            if mac_address in self.mac_addresses:
+                fatal("Domain '%s' has duplicate MAC address '%s'" % (self.name(), mac_address))
+            else:
+                self.mac_addresses.add(mac_address)
+            source = interface.getElementsByTagName('source')[0]
+            source_bridge = source.getAttribute('bridge')
+            if source_bridge in self.bridges:
+                fatal("Domain '%s' has duplicate interface source bridge '%s'" % (self.name(), source_bridge))
+            else:
+                self.bridges.add(source_bridge)
+        if len(self.bridges) == 0:
+            fatal("Bad domain '%s', no interface bridges detected" % self.name())
+
+    def _parse_disks(self):
+        self.devices = set()
+        disks = self.dom.getElementsByTagName('disk')
+        for disk in disks:
+            disk_device = disk.getAttribute('device')
+            if disk_device == 'cdrom':
+                continue
+            elif disk_device == 'disk':
+                disk_type = disk.getAttribute('type')
+                if disk_type != 'block':
+                    fatal("Unsupported disk type '%s' in domain '%s'" % (disk_type, self.name()))
+            else:
+                fatal("Unsupported disk device '%s' in domain '%s'" % (disk_device, self.name()))
+            source = disk.getElementsByTagName('source')[0]
+            source_dev = source.getAttribute('dev')
+            if source_dev in self.devices:
+                fatal("Domain '%s' has duplicate disk source dev '%s'" % (self.name(), source_dev))
+            else:
+                self.devices.add(source_dev)
+        if len(self.devices) == 0:
+            fatal("Bad domain '%s', no disk devices detected" % self.name())
+
+    def name(self):
+        return self.domain.name()
+
+    def uuid(self):
+        return self.domain.UUIDString()
+
+    def isActive(self):
+        return bool(self.domain.isActive())
+
+
+class Cloner(object):
+    def __init__(self, args):
+        self._parse_args(args)
+        self._parse_domains()
+        self._parse_bridges()
+
+    def _parse_args(self, args):
+        self.original_name = None
+        self.clone_name = None
+        self.net = dict()
+        self.disk = dict()
+        for argument in args:
+            if argument.count(':') != 2:
+                fatal("Bad argument '%s', two symbols ':' expected." % argument)
+            param, original_param, clone_param = argument.split(':')
+            if param == 'name':
+                if self.original_name is not None:
+                    fatal("Bad parameter 'name', already defined.")
+                else:
+                    self.original_name = original_param
+                    self.clone_name = clone_param
+            elif param == 'net':
+                if original_param in self.net:
+                    fatal("Bad parameter 'net' for original bridge '%s', already defined." % original_param)
+                elif clone_param in self.net.values():
+                    fatal("Bad parameter 'net' for clone bridge '%s', already defined." % clone_param)
+                else:
+                    self.net[original_param] = clone_param
+            elif param == 'disk':
+                if original_param in self.disk:
+                    fatal("Bad parameter 'disk' for original device '%s', already defined." % original_param)
+                elif clone_param in self.disk.values():
+                    fatal("Bad parameter 'disk' for clone device '%s', already defined." % clone_param)
+                else:
+                    self.disk[original_param] = clone_param
+        if self.original_name is None:
+            fatal("Parameter 'name' required")
+        if len(self.net)==0:
+            fatal("Parameter 'net' required")
+        if len(self.disk)==0:
+            fatal("Parameter 'disk' required")
+
+    def _parse_domains(self):
+        conn = libvirt.open('qemu:///system')
+        if conn == None:
+            fatal('Failed to open connection to qemu:///system')
+        assert conn.isSecure()
+        assert conn.isAlive()
+        self.conn = conn
+
+        self.domain_by_name = dict()
+        self.domain_by_uuid = dict()
+        self.domains = list()
+        self.mac_addresses = set()
+        domains = conn.listAllDomains(0)
+        for _domain in domains:
+            assert _domain.isPersistent()
+            uuid = _domain.UUIDString()
+            name = _domain.name()
+            domain = Domain(_domain)
+            self.domain_by_name[name] = domain
+            self.domain_by_uuid[uuid] = domain
+            self.domains.append(domain)
+            for mac_address in domain.mac_addresses:
+                if mac_address in self.mac_addresses:
+                    fatal("Domain '%s' has duplicate MAC address '%s'" % (domain.name(), mac_address))
+                else:
+                    self.mac_addresses.add(mac_address)
+
+    def _parse_bridges(self):
+        process = Process("brctl", "show")
+        if process.failed():
+            print("can't read bridges")
+            process.print_info("fatal error")
+            sys.exit(1)
+        lines = process.stdout.split('\n')
+        self.system_bridges = set()
+        for line in lines:
+            if line == '':
+                continue
+            if line.startswith('bridge name'):
+                continue
+            if line[0] == '\t':
+                continue
+            bridge = line.split()[0]
+            self.system_bridges.add(bridge)
+
+    def _check_clone_name(self):
+        allowed_chars = set(string.ascii_lowercase + string.ascii_uppercase + string.digits + '-' + '_')
+        if not(set(self.clone_name) <= allowed_chars):
+            fatal("Bad clone name '%s', only 'a-z', 'A-Z', '0-9', '-' and '_' chars allowed." % self.clone_name)
+
+    def _check_args(self):
+        self._check_clone_name()
+        if self.original_name not in self.domain_by_name:
+            fatal("Original domain '%s' not found." % self.original_name)
+        if self.clone_name in self.domain_by_name:
+            fatal("Clone domain '%s' already exists." % self.clone_name)
+        original_domain = self.domain_by_name[self.original_name]
+
+        for original_bridge in self.net:
+            clone_bridge = self.net[original_bridge]
+            if original_bridge not in self.system_bridges:
+                fatal("Bad original bridge '%s', such bridge not exists in system." % original_bridge)
+            if clone_bridge not in self.system_bridges:
+                fatal("Bad clone bridge '%s', such bridge not exists in system." % clone_bridge)
+            if original_bridge not in original_domain.bridges:
+                fatal("Bad original bridge '%s', such bridge not exists in domain '%s'." % (original_bridge, original_domain.name()))
+
+        for original_device in self.disk:
+            clone_device = self.disk[original_device]
+            if not os.path.exists(original_device):
+                fatal("Bad original device '%s', such device not exists in system." % original_device)
+            if os.path.exists(clone_device):
+                fatal("Bad clone device '%s', such device already exists in system." % clone_device)
+            if original_device not in original_domain.devices:
+                fatal("Bad original device '%s', such device not exists in domain '%s'." % (original_device, original_domain.name()))
+
+        for domain in self.domains:
+            for original_bridge in self.net:
+                clone_bridge = self.net[original_bridge]
+                if len(domain.bridges) == 1 and clone_bridge in domain.bridges:
+                    fatal("Bad clone bridge '%s', it already used in domain '%s'" % (clone_bridge, domain.name()))
+            for original_device in self.disk:
+                clone_device = self.disk[original_device]
+                if clone_device in domain.devices:
+                    fatal("Bad clone device '%s', it already used in domain '%s'" % (clone_device, domain.name()))
+
+        not_matched_devices = original_domain.devices - set(self.disk.keys())
+        if not_matched_devices:
+            fatal("Bad command line, no clones for original device %s" % ' '.join(not_matched_devices))
+
+        extra_devices = set(self.disk.keys()) - original_domain.devices
+        if extra_devices:
+            fatal("Bad command line, unexpected original device %s" % ' '.join(extra_devices))
+
+    def _set_clone_name(self):
+        self.clone_dom.getElementsByTagName('name')[0].firstChild.data = self.clone_name
+
+    def _set_clone_uuid(self):
+        clone_uuid = None
+        for tries in range(1024):
+            candidate_uuid = str(uuid.uuid4())
+            if candidate_uuid not in self.domain_by_uuid:
+                clone_uuid = candidate_uuid
+                break
+        if clone_uuid is None:
+            fatal("Can't generate unique uuid")
+        self.clone_dom.getElementsByTagName('uuid')[0].firstChild.data = clone_uuid
+
+    def _generate_random_mac(self):
+        mac = [0x52, 0x54, 0x00] + [
+                random.randint(0x00, 0xff),
+                random.randint(0x00, 0xff),
+                random.randint(0x00, 0xff)]
+        return ':'.join(["%02x" % x for x in mac])
+
+    def _generate_unique_mac(self):
+        unique_mac = None
+        for tries in range(1024):
+            candidate_mac = self._generate_random_mac()
+            if candidate_mac not in self.mac_addresses:
+                unique_mac = candidate_mac
+                break
+        if unique_mac is None:
+            fatal("Can't generate unique mac address")
+        else:
+            return unique_mac
+
+    def _clone_net(self):
+        interfaces = self.clone_dom.getElementsByTagName('interface')
+        for interface in interfaces:
+            mac = interface.getElementsByTagName('mac')[0]
+            mac.setAttribute('address', self._generate_unique_mac())
+            source = interface.getElementsByTagName('source')[0]
+            source_bridge = source.getAttribute('bridge')
+            if source_bridge in self.net:
+                clone_bridge = self.net[source_bridge]
+                source.setAttribute('bridge', clone_bridge)
+            else:
+                print("WARNING! bridge '%s' not changed when cloning domain '%s'" % (source_bridge, self.original_name))
+
+    def _clone_disk(self):
+        disks = self.clone_dom.getElementsByTagName('disk')
+        for disk in disks:
+            disk_device = disk.getAttribute('device')
+            disk_type = disk.getAttribute('type')
+            if disk_device == 'disk' and disk_type == 'block':
+                source = disk.getElementsByTagName('source')[0]
+                source_dev = source.getAttribute('dev')
+                clone_device = self.disk[source_dev]
+                source.setAttribute('dev', clone_device)
+
+    def _clone_devices(self):
+        zfs_copy = dict()
+        for original_device in self.disk:
+            if original_device.startswith('/dev/zvol/'):
+                original_dataset = original_device[len('/dev/zvol/'):]
+            else:
+                fatal("Bad original device name '%s', it must starts with '/dev/zvol/'" % original_device)
+            clone_device = self.disk[original_device]
+            if clone_device.startswith('/dev/zvol/'):
+                clone_dataset = clone_device[len('/dev/zvol/'):]
+            else:
+                fatal("Bad clone device name '%s', it must starts with '/dev/zvol/'" % clone_device)
+            zfs_copy[original_dataset]=clone_dataset
+
+        for original_dataset in zfs_copy:
+            clone_dataset = zfs_copy[original_dataset]
+
+            snapshot_name = datetime.datetime.now().strftime('vm.clone.%Y-%m-%d.%H:%M:%S.tmp.'+str(uuid.uuid4()))
+
+            original_snapshot = original_dataset + '@' + snapshot_name
+            clone_snapshot = clone_dataset + '@' + snapshot_name
+
+            Process.execute('/sbin/zfs', 'snapshot', original_snapshot)
+
+            template = "/sbin/zfs send -c -e '%s' | /sbin/zfs receive -F '%s'"
+            command = template % (original_snapshot, clone_dataset)
+            Process.execute("/bin/bash", "-c", command)
+
+            Process.execute('/sbin/zfs', 'destroy', original_snapshot)
+            Process.execute('/sbin/zfs', 'destroy', clone_snapshot)
+
+    def _clone_domain(self):
+        xml = self.clone_dom.toxml()
+        clone_domain = self.conn.defineXML(xml)
+        if clone_domain is None:
+            fatal("Failed to define a clone domain '%s' from an XML definition." % self.clone_name, file=sys.stderr)
+
+    def clone(self):
+        self._check_args()
+        original_domain = self.domain_by_name[self.original_name]
+        if original_domain.isActive():
+            fatal("Can't clone active domain '%s', shutdown it first." % original_domain.name())
+        self.clone_dom = minidom.parseString(original_domain.xml)
+        self._set_clone_name()
+        self._set_clone_uuid()
+        self._clone_net()
+        self._clone_disk()
+        self._clone_devices()
+        self._clone_domain()
+
+
+def clone(args):
+    Cloner(args).clone()
+    sys.exit(0)
+
+
+def usage():
+    print("")
+    print("usage:")
+    print("  vm clone name:<original-name>:<clone-name> net:<original-bridge>:<clone-bridge> disk:<original-device>:<clone-device>")
+    print("")
+    sys.exit(2)
+
+
+def main():
+    args = sys.argv[1:]
+    if len(args) == 0 or set(args) & set(['-h', '--help']):
+        usage()
+    elif args[0] == 'clone':
+        clone(args[1:])
+    else:
+        print("")
+        print("unknown command '%s'" % args[0])
+        usage()
+
+
+if __name__=='__main__':
+    main()
