@@ -24,6 +24,7 @@ Currently ``vm`` understand only one command, - ``clone``.
 Usage:
 
 .. code-block:: none
+
     vm clone name:<original-name>:<clone-name> net:<original-bridge>:<clone-bridge> disk:<original-device>:<clone-device>
 
 All command line parameters are required.
@@ -43,6 +44,7 @@ Example
 -------
 
 .. code-block:: none
+
     # /opt/vm/vm clone name:template-server:work101-server net:br099:br101 \
         disk:/dev/zvol/tank/kvm-template-server-system:/dev/zvol/tank/kvm-work101-server-system \
         disk:/dev/zvol/tank/kvm-template-server-data:/dev/zvol/tank/kvm-work101-server-data
