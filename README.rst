@@ -19,9 +19,9 @@ Upgrade
 Usage
 -----
 
-Currently ``vm`` understand only one command, - ``clone``.
+Currently ``vm`` understand only two commands, - ``clone`` and ``udev``.
 
-Usage:
+``clone`` usage:
 
 .. code-block:: none
 
@@ -42,8 +42,20 @@ as network devices and use ZFS zvols as block devices.
 
 If you need tool for cloning ordinary virtual machines - you can try to use virt-clone tool.
 
+``udev`` usage:
+
+.. code-block:: none
+
+    # /opt/vm/vm udev
+
+This command iterate all virtual machines and print udev rules
+for renaming network interfaces inside router virtual machines.
+Router is virtual machine with more than one network interface.
+
 Example
 -------
+
+``clone`` example:
 
 .. code-block:: none
 
@@ -62,4 +74,18 @@ changed from ``br099`` to ``br101`` and two new virtual disk devices,
 with all disk content copied from original disk devices.
 
 All other settings will be identical for original and clone virtual machines.
+
+``udev`` example:
+
+.. code-block:: none
+
+    # /opt/vm/vm udev
+
+    # example-router /etc/udev/rules.d/99-br-interfaces.rules
+
+    SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="52:54:00:30:81:f5", NAME="br099"
+    SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="52:54:00:85:4f:16", NAME="br100"
+    SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="52:54:00:8f:08:bb", NAME="br101"
+
+These udev rules should be placed in file /etc/udev/rules.d/99-br-interfaces.rules inside virtual machine.
 

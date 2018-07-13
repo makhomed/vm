@@ -115,6 +115,47 @@ class Domain(object):
     def isActive(self):
         return bool(self.domain.isActive())
 
+class Udev(object):
+    def __init__(self):
+        self._parse_routers()
+
+    def _parse_routers(self):
+        conn = libvirt.open('qemu:///system')
+        if conn == None:
+            fatal('Failed to open connection to qemu:///system')
+        assert conn.isSecure()
+        assert conn.isAlive()
+        self.conn = conn
+        self.routers = list()
+        domains = conn.listAllDomains(0)
+        for _domain in domains:
+            assert _domain.isPersistent()
+            domain = Domain(_domain)
+            if len(domain.bridges) > 1:
+                self.routers.append(domain)
+
+
+    def udev(self):
+        for router in self.routers:
+            print()
+            print("# %s /etc/udev/rules.d/99-br-interfaces.rules" % router.name())
+            print()
+        bridges = dict()
+        interfaces = router.dom.getElementsByTagName('interface')
+        for interface in interfaces:
+            mac = interface.getElementsByTagName('mac')[0]
+            mac_address = mac.getAttribute('address')
+            source = interface.getElementsByTagName('source')[0]
+            source_bridge = source.getAttribute('bridge')
+            bridges[source_bridge] = mac_address
+        for bridge in sorted(bridges.keys()):
+            if bridge == 'br0':
+                continue
+            mac_address = bridges[bridge]
+            print('SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="%s", NAME="%s"' % (mac_address,bridge))
+        print()
+
+
 
 class Cloner(object):
     def __init__(self, args):
@@ -364,11 +405,15 @@ def clone(args):
     Cloner(args).clone()
     sys.exit(0)
 
+def udev():
+    Udev().udev()
+    sys.exit(0)
 
 def usage():
     print("")
     print("usage:")
     print("  vm clone name:<original-name>:<clone-name> net:<original-bridge>:<clone-bridge> disk:<original-device>:<clone-device>")
+    print("  vm udev")
     print("")
     sys.exit(2)
 
@@ -379,6 +424,8 @@ def main():
         usage()
     elif args[0] == 'clone':
         clone(args[1:])
+    elif args[0] == 'udev':
+        udev()
     else:
         print("")
         print("unknown command '%s'" % args[0])
