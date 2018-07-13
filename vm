@@ -17,8 +17,8 @@ from xml.dom import minidom
 __author__ = "Gena Makhomed"
 __contact__ = "https://github.com/makhomed/vm"
 __license__ = "GPLv3"
-__version__ = "1.0.0"
-__date__ = "2018-07-08"
+__version__ = "1.0.1"
+__date__ = "2018-07-13"
 
 
 def fatal(message):
