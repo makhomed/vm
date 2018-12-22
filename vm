@@ -136,6 +136,8 @@ class Udev(object):
 
 
     def udev(self):
+        if len(self.routers) == 0:
+            fatal("fatal error: router vm not found! can't generate udev rules")
         for router in self.routers:
             print()
             print("# %s /etc/udev/rules.d/99-br-interfaces.rules" % router.name())
