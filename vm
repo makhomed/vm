@@ -1,4 +1,4 @@
-#!/usr/bin/python -u
+#!/usr/bin/python3 -u
 
 
 from __future__ import print_function
@@ -27,10 +27,13 @@ def fatal(message):
 
 
 class Process(object):
+
     def __init__(self, *args):
         self.args = args
         process = subprocess.Popen(args, stdin=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True, cwd='/')
-        self.stdout, self.stderr = process.communicate()
+        self.stdout_bytes, self.stderr_bytes = process.communicate()
+        self.stdout = self.stdout_bytes.decode(encoding="utf-8", errors="replace").strip()
+        self.stderr = self.stderr_bytes.decode(encoding="utf-8", errors="replace").strip()
         self.returncode = process.returncode
 
     def failed(self):
@@ -228,7 +231,7 @@ class Cloner(object):
                 else:
                     self.mac_addresses.add(mac_address)
 
-    def _parse_bridges(self):
+    def _parse_bridges_centos_7(self):
         process = Process("brctl", "show")
         if process.failed():
             print("can't read bridges")
@@ -245,6 +248,21 @@ class Cloner(object):
                 continue
             bridge = line.split()[0]
             self.system_bridges.add(bridge)
+
+    def _parse_bridges(self):
+        process = Process("networkctl", "list", "--no-legend")
+        if process.failed():
+            print("can't read bridges")
+            process.print_info("fatal error")
+            sys.exit(1)
+        lines = process.stdout.split('\n')
+        self.system_bridges = set()
+        for line in lines:
+            if line == '':
+                continue
+            _, interface_name, interface_type, _, _ = line.split()
+            if interface_type == 'bridge':
+                self.system_bridges.add(interface_name)
 
     def _check_clone_name(self):
         allowed_chars = set(string.ascii_lowercase + string.ascii_uppercase + string.digits + '-' + '_')
