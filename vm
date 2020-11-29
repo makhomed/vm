@@ -154,10 +154,8 @@ class Udev(object):
             source_bridge = source.getAttribute('bridge')
             bridges[source_bridge] = mac_address
         for bridge in sorted(bridges.keys()):
-            if bridge == 'br0':
-                continue
             mac_address = bridges[bridge]
-            print('SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="%s", NAME="%s"' % (mac_address,bridge))
+            print('SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="%s", NAME="%s"' % (mac_address, bridge))
         print()
 
 
